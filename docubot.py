@@ -9,6 +9,57 @@ Core DocuBot class responsible for:
 
 import os
 import glob
+import string
+
+# Words that show up in almost every question or sentence, so they
+# are not useful when we try to match a query to a document.
+STOPWORDS = {
+    "a", "an", "the", "and", "or", "of", "to", "in", "on", "for",
+    "is", "are", "was", "were", "be", "been", "being", "it", "its",
+    "this", "that", "these", "those", "i", "you", "we", "they",
+    "he", "she", "my", "your", "our", "how", "what", "where", "when",
+    "which", "who", "why", "do", "does", "did", "can", "could",
+    "should", "would", "will", "with", "from", "at", "by", "as",
+    "if", "not", "no", "all", "any", "about", "into", "than",
+    "there", "mention", "docs", "doc", "document", "documentation",
+}
+
+
+def tokenize(text):
+    """
+    Lowercase the text, replace punctuation with spaces, and drop
+    common stopwords. Returns a list of remaining words.
+    """
+    cleaned = text.lower()
+    for mark in string.punctuation:
+        cleaned = cleaned.replace(mark, " ")
+
+    words = []
+    for word in cleaned.split():
+        if word and word not in STOPWORDS:
+            words.append(word)
+    return words
+
+
+# A snippet must overlap the query by at least this many words,
+# otherwise retrieve() returns nothing and the answer methods refuse.
+MIN_SCORE = 1
+
+
+def split_into_snippets(documents):
+    """
+    Split each document into paragraph snippets on blank lines.
+    Each snippet keeps the filename it came from.
+    """
+    snippets = []
+    for filename, text in documents:
+        for part in text.split("\n\n"):
+            cleaned = part.strip()
+            # Skip empty or very short pieces such as a heading alone
+            if cleaned and len(cleaned.split()) >= 5:
+                snippets.append((filename, cleaned))
+    return snippets
+
 
 class DocuBot:
     def __init__(self, docs_folder="docs", llm_client=None):
@@ -21,6 +72,9 @@ class DocuBot:
 
         # Load documents into memory
         self.documents = self.load_documents()  # List of (filename, text)
+
+        # Split each document into smaller paragraph snippets
+        self.snippets = split_into_snippets(self.documents)
 
         # Build a retrieval index (implemented in Phase 1)
         self.index = self.build_index(self.documents)
@@ -50,9 +104,8 @@ class DocuBot:
 
     def build_index(self, documents):
         """
-        TODO (Phase 1):
-        Build a tiny inverted index mapping lowercase words to the documents
-        they appear in.
+        Build a tiny inverted index mapping lowercase words to the
+        documents they appear in.
 
         Example structure:
         {
@@ -60,11 +113,15 @@ class DocuBot:
             "database": ["DATABASE.md"]
         }
 
-        Keep this simple: split on whitespace, lowercase tokens,
-        ignore punctuation if needed.
+        Split on whitespace, lowercase tokens, and ignore punctuation.
         """
         index = {}
-        # TODO: implement simple indexing
+        for filename, text in documents:
+            for word in tokenize(text):
+                if word not in index:
+                    index[word] = []
+                if filename not in index[word]:
+                    index[word].append(filename)
         return index
 
     # -----------------------------------------------------------
@@ -73,27 +130,49 @@ class DocuBot:
 
     def score_document(self, query, text):
         """
-        TODO (Phase 1):
-        Return a simple relevance score for how well the text matches the query.
+        Return a simple relevance score for how well the text matches
+        the query.
 
-        Suggested baseline:
-        - Convert query into lowercase words
-        - Count how many appear in the text
-        - Return the count as the score
+        The score is the number of unique query words that also appear
+        in the text. Stopwords and punctuation are ignored.
         """
-        # TODO: implement scoring
-        return 0
+        query_words = set(tokenize(query))
+        text_words = set(tokenize(text))
+        score = 0
+        for word in query_words:
+            if word in text_words:
+                score += 1
+        return score
 
     def retrieve(self, query, top_k=3):
         """
-        TODO (Phase 1):
-        Use the index and scoring function to select top_k relevant document snippets.
+        Use the index and scoring function to select top_k relevant
+        paragraph snippets.
 
         Return a list of (filename, text) sorted by score descending.
+        If no snippet meets MIN_SCORE, return an empty list so the
+        answer methods can say they do not know.
         """
+        query_words = set(tokenize(query))
+
+        # Use the index to find documents that share at least one word
+        # with the query, so we do not score every file blindly.
+        candidate_files = set()
+        for word in query_words:
+            for filename in self.index.get(word, []):
+                candidate_files.add(filename)
+
         results = []
-        # TODO: implement retrieval logic
-        return results[:top_k]
+        for filename, text in self.snippets:
+            if candidate_files and filename not in candidate_files:
+                continue
+            score = self.score_document(query, text)
+            # Guardrail: skip snippets that do not overlap the query enough
+            if score >= MIN_SCORE:
+                results.append((score, filename, text))
+
+        results.sort(key=lambda item: item[0], reverse=True)
+        return [(filename, text) for score, filename, text in results[:top_k]]
 
     # -----------------------------------------------------------
     # Answering Modes
